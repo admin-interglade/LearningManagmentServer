@@ -213,7 +213,7 @@ After submission, every question also carries `correctIndex` and `explanation`, 
 | PUT | `/profile` | Any | below → `{ user }` |
 
 **`POST /auth/register`** (step-2 fields optional; blank strings count as not provided):
-
+  
 ```json
 {
   "name": "Asha Kumar", "email": "asha@example.com", "phone": "+91 9876543210", "password": "Secret123",
