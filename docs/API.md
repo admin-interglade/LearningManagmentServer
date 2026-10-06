@@ -1,6 +1,7 @@
 # Interglade Talent — Online Exam System · API Reference
 
 This is the contract the web front end is wired to. Field names and shapes are the ones the UI reads.
+Section 18 has a copy-ready request and a real response for every endpoint.
 
 - **Base URL (dev):** `http://localhost:4000/api`
 - **Format:** JSON in and out, **camelCase** keys.
@@ -16,6 +17,8 @@ Admin routes return **403** (not 404) for a student token.
 ---
 
 ## Contents
+
+- [Getting started (frontend)](#getting-started-frontend): base URL, CORS, client snippet, setup, where data is stored
 
 1. [Errors, pagination, validation](#1-errors-pagination-validation)
 2. [Data model](#2-data-model)
@@ -34,6 +37,95 @@ Admin routes return **403** (not 404) for a student token.
 15. [Server-side rules](#15-server-side-rules)
 16. [Answers to the open questions](#16-answers-to-the-open-questions)
 17. [Endpoint index](#17-endpoint-index)
+18. [Examples](#18-examples): a real request and response for every endpoint
+
+---
+
+## Getting started (frontend)
+
+**1. Point the frontend at the API.** In the frontend's `.env` (Vite):
+
+```
+VITE_API_URL=http://localhost:4000/api
+```
+
+**2. Allow your frontend's address (CORS).** The browser only accepts responses for origins listed in the backend's
+`CORS_ORIGIN` setting (`backend/.env`, comma-separated, default `http://localhost:5173`):
+
+```
+CORS_ORIGIN=http://localhost:5173,http://localhost:3000,https://your-deployed-site.com
+```
+
+- Restart the backend after changing it.
+- CORS is enabled by this line in `backend/src/app.ts`, and it must not be commented out:
+  `app.use(cors({ origin: env.corsOrigin, credentials: true }));`
+- A CORS error in the browser console means the frontend's origin is missing from `CORS_ORIGIN`, or that line is off.
+- Postman and curl ignore CORS, so they work either way.
+
+**3. Call the API.** A minimal client:
+
+```js
+const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:4000/api';
+
+export async function api(path, { method = 'GET', body, token } = {}) {
+  const res = await fetch(`${API_URL}${path}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw Object.assign(new Error(data.error.message), data.error, { status: res.status });
+  return data;
+}
+
+// Sign in, keep the token, send it on later calls.
+const { token, user } = await api('/auth/login', { method: 'POST', body: { identifier: 'asha@example.com', password: 'Secret123' } });
+const me = await api('/auth/me', { token });
+
+// Show validation messages under the form fields.
+try { await api('/auth/register', { method: 'POST', body: form }); }
+catch (e) { setFieldErrors(e.details ?? {}); } // e.g. { email: ["This email is already used by another account"] }
+```
+
+**4. Admin access.** `npm run db:seed` creates one admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `backend/.env`
+(defaults `admin@interglade.com` / `Admin@12345`). Log in with it through `POST /auth/login` to get an admin token.
+
+**5. Backend setup** (in `backend/`):
+
+```bash
+npm install
+npm run db:migrate   # creates/updates tables; run again after pulling changes that add a migration
+npm run db:seed      # admin account, subjects, question bank, demo exams, EARLY20 code (safe to re-run)
+npm run dev          # http://localhost:4000
+npm test             # end-to-end tests (use a separate test database)
+```
+
+`DATABASE_URL` in `backend/.env` selects the database (local Postgres or Neon). A `500 INTERNAL` on every request
+usually means the database is unreachable or a migration hasn't been run; the real error is printed in the
+`npm run dev` terminal.
+
+### Where the data is stored
+
+| Action | Endpoint | Table(s) |
+| --- | --- | --- |
+| Sign-up, profile, admin-created students/admins | `/auth/register`, `/profile`, `/admin/students`, `/admin/admins` | `users` |
+| Password reset | `/auth/forgot-password`, `/auth/reset-password` | `password_resets` |
+| Exam builder | `/admin/exams` | `exams`, `exam_levels`, `level_sections` |
+| Slots | `/admin/exams/:examId/slots`, `/admin/slots/:slotId` | `exam_slots` |
+| Checkout | `/student/registrations` | `registrations`, `payments` |
+| Payment confirmation | `/payments/verify`, `/payments/mock-complete`, `/payments/webhook` | `payments`, `registrations`, `discounts` (`used_count`) |
+| Slot booking | `/student/registrations/:id/slot` | `registration_slots` |
+| Papers | `/attempts…` | `attempts`, `attempt_questions` |
+| Discount codes | `/admin/discounts` | `discounts` |
+| Payment settings | `/admin/settings/payment` | `payment_settings` |
+| Subjects & question bank | `/admin/categories`, `/admin/questions` | `question_categories`, `questions` |
+| Applied migrations | `npm run db:migrate` | `schema_migrations` |
+
+Some columns are named differently from the API fields: `name` → `full_name`, `dob` → `date_of_birth`,
+`registrationFee` → `fee`, `passPercent` → `pass_percentage`. Passwords are stored only as a bcrypt `password_hash`.
 
 ---
 
@@ -739,3 +831,3712 @@ Questions come back as `{ id, categoryId, category, complexity, text, options, c
 | PUT | `/admin/questions/:id` | Admin |
 | DELETE | `/admin/questions/:id` | Admin |
 | POST | `/admin/questions/preview` | Admin |
+
+---
+
+## 18. Examples
+
+Real requests and the responses the API returned for them, captured against a freshly seeded database.
+Ids, timestamps and generated questions will differ on your machine.
+To keep this readable, lists of objects are trimmed to their first one or two items (`questions` to two), and tokens are shortened.
+
+Every request goes to `http://localhost:4000/api<path>` with `Content-Type: application/json`.
+Where the auth is a token, send it as `Authorization: Bearer <token>`. The token comes from **Login as admin** or from **Register** / **Login**.
+
+### 18.1 Auth & profile
+
+#### Register — validation error (400)
+
+`POST /auth/register` · auth: none · **400**
+
+Request:
+
+```json
+{
+  "name": "A",
+  "password": "short",
+  "dob": "2013-05-10"
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "Validation failed",
+    "code": "BAD_REQUEST",
+    "details": {
+      "name": ["Name must be at least 2 characters"],
+      "password": ["Password must be at least 8 characters"],
+      "email": ["Email or phone is required"]
+    }
+  }
+}
+```
+
+#### Register
+
+`POST /auth/register` · auth: none · **201**
+
+Request:
+
+```json
+{
+  "name": "Asha Kumar",
+  "email": "asha@example.com",
+  "phone": "+91 9876543210",
+  "password": "Secret123",
+  "dob": "2013-05-10",
+  "gender": "female",
+  "school": "Delhi Public School",
+  "grade": "7",
+  "city": "Pune",
+  "state": "Maharashtra",
+  "guardianName": "R. Kumar",
+  "guardianPhone": "+91 9876500000"
+}
+```
+
+Response:
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.…",
+  "user": {
+    "id": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+    "role": "student",
+    "name": "Asha Kumar",
+    "email": "asha@example.com",
+    "phone": "+91 9876543210",
+    "dob": "2013-05-10",
+    "gender": "female",
+    "school": "Delhi Public School",
+    "grade": "7",
+    "city": "Pune",
+    "state": "Maharashtra",
+    "guardianName": "R. Kumar",
+    "guardianPhone": "+91 9876500000",
+    "createdAt": "2026-09-29T11:22:11.814Z"
+  }
+}
+```
+
+#### Register — duplicate email or phone (409)
+
+`POST /auth/register` · auth: none · **409**
+
+Request:
+
+```json
+{
+  "name": "Asha Again",
+  "phone": "9876543210",
+  "password": "Secret123",
+  "dob": "2013-05-10"
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "This phone is already used by another account",
+    "code": "CONFLICT",
+    "details": {
+      "phone": ["This phone is already used by another account"]
+    }
+  }
+}
+```
+
+#### Login with email
+
+`POST /auth/login` · auth: none · **200**
+
+Request:
+
+```json
+{
+  "identifier": "asha@example.com",
+  "password": "Secret123"
+}
+```
+
+Response:
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.…",
+  "user": {
+    "id": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+    "role": "student",
+    "name": "Asha Kumar",
+    "email": "asha@example.com",
+    "phone": "+91 9876543210",
+    "dob": "2013-05-10",
+    "gender": "female",
+    "school": "Delhi Public School",
+    "grade": "7",
+    "city": "Pune",
+    "state": "Maharashtra",
+    "guardianName": "R. Kumar",
+    "guardianPhone": "+91 9876500000",
+    "createdAt": "2026-09-29T11:22:11.814Z"
+  }
+}
+```
+
+#### Login with phone
+
+`POST /auth/login` · auth: none · **200**
+
+Request:
+
+```json
+{
+  "identifier": "9876543210",
+  "password": "Secret123"
+}
+```
+
+Response:
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.…",
+  "user": {
+    "id": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+    "role": "student",
+    "name": "Asha Kumar",
+    "email": "asha@example.com",
+    "phone": "+91 9876543210",
+    "dob": "2013-05-10",
+    "gender": "female",
+    "school": "Delhi Public School",
+    "grade": "7",
+    "city": "Pune",
+    "state": "Maharashtra",
+    "guardianName": "R. Kumar",
+    "guardianPhone": "+91 9876500000",
+    "createdAt": "2026-09-29T11:22:11.814Z"
+  }
+}
+```
+
+#### Login — wrong password (401)
+
+`POST /auth/login` · auth: none · **401**
+
+Request:
+
+```json
+{
+  "identifier": "asha@example.com",
+  "password": "Wrong123"
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "Invalid email/phone or password",
+    "code": "UNAUTHORIZED"
+  }
+}
+```
+
+#### Login as admin
+
+`POST /auth/login` · auth: none · **200**
+
+Request:
+
+```json
+{
+  "identifier": "admin@interglade.com",
+  "password": "Admin@12345"
+}
+```
+
+Response:
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.…",
+  "user": {
+    "id": "ab87783e-53cb-43c0-9881-4a955a8e1b8a",
+    "role": "admin",
+    "name": "Interglade Admin",
+    "email": "admin@interglade.com",
+    "phone": null,
+    "dob": null,
+    "gender": null,
+    "school": null,
+    "grade": null,
+    "city": null,
+    "state": null,
+    "guardianName": null,
+    "guardianPhone": null,
+    "createdAt": "2026-09-29T11:22:10.642Z"
+  }
+}
+```
+
+#### Current user (session restore)
+
+`GET /auth/me` · auth: student token · **200**
+
+Response:
+
+```json
+{
+  "user": {
+    "id": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+    "role": "student",
+    "name": "Asha Kumar",
+    "email": "asha@example.com",
+    "phone": "+91 9876543210",
+    "dob": "2013-05-10",
+    "gender": "female",
+    "school": "Delhi Public School",
+    "grade": "7",
+    "city": "Pune",
+    "state": "Maharashtra",
+    "guardianName": "R. Kumar",
+    "guardianPhone": "+91 9876500000",
+    "createdAt": "2026-09-29T11:22:11.814Z"
+  }
+}
+```
+
+#### Forgot password
+
+`POST /auth/forgot-password` · auth: none · **200**
+
+Request:
+
+```json
+{
+  "identifier": "asha@example.com"
+}
+```
+
+Response:
+
+```json
+{
+  "message": "If an account exists, password reset instructions have been sent.",
+  "devResetToken": "02cda3dbc07aa75d94baf9511806f0a7326467dcf149ad85cf8df10df9660aec"
+}
+```
+
+#### Reset password
+
+`POST /auth/reset-password` · auth: none · **200**
+
+Request:
+
+```json
+{
+  "identifier": "asha@example.com",
+  "token": "02cda3dbc07aa75d94baf9511806f0a7326467dcf149ad85cf8df10df9660aec",
+  "password": "NewSecret123"
+}
+```
+
+Response:
+
+```json
+{
+  "message": "Password updated. You can now log in."
+}
+```
+
+#### Change password
+
+`POST /auth/change-password` · auth: student token · **200**
+
+Request:
+
+```json
+{
+  "currentPassword": "NewSecret123",
+  "newPassword": "Secret123"
+}
+```
+
+Response:
+
+```json
+{
+  "message": "Password changed successfully"
+}
+```
+
+#### Get profile
+
+`GET /profile` · auth: student token · **200**
+
+Response:
+
+```json
+{
+  "user": {
+    "id": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+    "role": "student",
+    "name": "Asha Kumar",
+    "email": "asha@example.com",
+    "phone": "+91 9876543210",
+    "dob": "2013-05-10",
+    "gender": "female",
+    "school": "Delhi Public School",
+    "grade": "7",
+    "city": "Pune",
+    "state": "Maharashtra",
+    "guardianName": "R. Kumar",
+    "guardianPhone": "+91 9876500000",
+    "createdAt": "2026-09-29T11:22:11.814Z"
+  }
+}
+```
+
+#### Update profile (full replace)
+
+`PUT /profile` · auth: student token · **200**
+
+Request:
+
+```json
+{
+  "name": "Asha Kumar",
+  "email": "asha@example.com",
+  "phone": "+91 9876543210",
+  "dob": "2013-05-10",
+  "gender": "female",
+  "school": "DPS",
+  "grade": "7",
+  "city": "Pune",
+  "state": "Maharashtra",
+  "guardianName": "R. Kumar",
+  "guardianPhone": "+91 9876500000"
+}
+```
+
+Response:
+
+```json
+{
+  "user": {
+    "id": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+    "role": "student",
+    "name": "Asha Kumar",
+    "email": "asha@example.com",
+    "phone": "+91 9876543210",
+    "dob": "2013-05-10",
+    "gender": "female",
+    "school": "DPS",
+    "grade": "7",
+    "city": "Pune",
+    "state": "Maharashtra",
+    "guardianName": "R. Kumar",
+    "guardianPhone": "+91 9876500000",
+    "createdAt": "2026-09-29T11:22:11.814Z"
+  }
+}
+```
+
+### 18.2 Public
+
+#### Health check
+
+`GET /health` · auth: none · **200**
+
+Response:
+
+```json
+{
+  "ok": true
+}
+```
+
+#### Published exams
+
+`GET /public/exams` · auth: none · **200**
+
+> Trimmed to the first exam; arrays in examples show at most 2 items.
+
+Response:
+
+```json
+[
+  {
+    "id": "68c1637d-7d16-4a01-b755-357e24a520e3",
+    "title": "Interglade Science & Computers Quiz — Summer 2026",
+    "description": "A one-level quiz on science and computers.",
+    "award": "₹5,000 for the winner",
+    "ageGroupMin": 10,
+    "ageGroupMax": 18,
+    "registrationStart": "2026-07-31T11:22:10.679Z",
+    "registrationEnd": "2026-08-25T11:22:10.679Z",
+    "examStart": "2026-08-30T11:22:10.679Z",
+    "examEnd": "2026-09-04T11:22:10.679Z",
+    "durationMinutes": 30,
+    "registrationFee": 0,
+    "currency": "INR",
+    "practiceAttempts": 3,
+    "practiceQuestionCount": 10,
+    "published": true,
+    "phase": "Completed",
+    "registrationOpen": false,
+    "registeredCount": 0,
+    "levels": [
+      {
+        "id": "647b770e-54e2-48bb-b5f5-f52388fc68c2",
+        "order": 1,
+        "name": "Level 1 — Quiz",
+        "attempts": 2,
+        "durationMinutes": 20,
+        "passPercent": 40,
+        "sections": [
+          {
+            "id": "311cf234-743d-4dd6-9227-14cb5c1d2ab3",
+            "category": "Science",
+            "categoryId": "e510b71c-1b10-4763-af8e-a41e7a93ad7d",
+            "complexity": "Low",
+            "questionCount": 5,
+            "marksPerQuestion": 1
+          }
+        ],
+        "maxScore": 10
+      }
+    ],
+    "slots": [
+      {
+        "id": "a4941d73-f6cb-47a1-9ddf-e88d9fbfec00",
+        "levelId": "647b770e-54e2-48bb-b5f5-f52388fc68c2",
+        "startsAt": "2026-08-30T11:22:10.679Z",
+        "endsAt": "2026-09-04T11:22:10.679Z",
+        "capacity": 300,
+        "bookedCount": 0
+      }
+    ],
+    "createdAt": "2026-09-29T11:22:10.697Z"
+  }
+]
+```
+
+#### One exam
+
+`GET /public/exams/276db0fb-c136-42f7-8abc-1469431b0e6e` · auth: none · **200**
+
+Response:
+
+```json
+{
+  "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "title": "Interglade Maths Olympiad 2026",
+  "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+  "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+  "ageGroupMin": 8,
+  "ageGroupMax": 16,
+  "registrationStart": "2026-09-19T11:22:10.679Z",
+  "registrationEnd": "2026-10-19T11:22:10.679Z",
+  "examStart": "2026-09-28T11:22:10.679Z",
+  "examEnd": "2026-10-29T11:22:10.679Z",
+  "durationMinutes": 30,
+  "registrationFee": 499,
+  "currency": "INR",
+  "practiceAttempts": 3,
+  "practiceQuestionCount": 10,
+  "published": true,
+  "phase": "In Progress",
+  "registrationOpen": true,
+  "registeredCount": 0,
+  "levels": [
+    {
+      "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+      "order": 1,
+      "name": "Level 1 — Foundation",
+      "attempts": 5,
+      "durationMinutes": 30,
+      "passPercent": 40,
+      "sections": [
+        {
+          "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+          "category": "Mathematics",
+          "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+          "complexity": "Low",
+          "questionCount": 10,
+          "marksPerQuestion": 1
+        }
+      ],
+      "maxScore": 15
+    }
+  ],
+  "slots": [
+    {
+      "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+      "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+      "startsAt": "2026-09-29T10:22:10.679Z",
+      "endsAt": "2026-10-14T11:22:10.679Z",
+      "capacity": 500,
+      "bookedCount": 0
+    }
+  ],
+  "createdAt": "2026-09-29T11:22:10.680Z"
+}
+```
+
+#### Home page counters
+
+`GET /public/stats` · auth: none · **200**
+
+Response:
+
+```json
+{
+  "students": 1,
+  "exams": 2,
+  "subjects": 6,
+  "topAward": 10000
+}
+```
+
+#### Categories
+
+`GET /categories` · auth: none · **200**
+
+Response:
+
+```json
+[
+  {
+    "id": "409e7081-a3da-4f62-8639-6d929c1cafd5",
+    "name": "Computers",
+    "slug": "computers",
+    "description": "Admin-managed question bank",
+    "generator": "bank",
+    "questionCount": 15
+  },
+  {
+    "id": "50fbd357-9c92-4001-9cd4-97f662569e61",
+    "name": "English",
+    "slug": "english",
+    "description": "Admin-managed question bank",
+    "generator": "bank",
+    "questionCount": 15
+  }
+]
+```
+
+### 18.3 Student
+
+#### Validate a discount code
+
+`POST /student/discounts/validate` · auth: student token · **200**
+
+Request:
+
+```json
+{
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "code": "EARLY20"
+}
+```
+
+Response:
+
+```json
+{
+  "code": "EARLY20",
+  "label": "Early bird 20% off",
+  "gross": 499,
+  "discount": 99.8,
+  "taxable": 399.2,
+  "tax": 71.86,
+  "total": 471.06
+}
+```
+
+#### Validate — bad code (400)
+
+`POST /student/discounts/validate` · auth: student token · **400**
+
+Request:
+
+```json
+{
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "code": "NOPE"
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "Invalid discount code",
+    "code": "BAD_REQUEST",
+    "details": {
+      "code": ["Invalid discount code"]
+    }
+  }
+}
+```
+
+#### Register for an exam (creates the payment order)
+
+`POST /student/registrations` · auth: student token · **201**
+
+Request:
+
+```json
+{
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "discountCode": "EARLY20"
+}
+```
+
+Response:
+
+```json
+{
+  "registration": {
+    "id": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+    "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+    "studentId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+    "status": "active",
+    "registeredAt": "2026-09-29T11:22:12.440Z",
+    "slotByLevel": {},
+    "payment": {
+      "id": "7e396aef-9acf-48b5-af62-9c9309086611",
+      "gross": 499,
+      "discount": 99.8,
+      "tax": 71.86,
+      "amount": 471.06,
+      "discountCode": "EARLY20",
+      "status": "pending",
+      "method": null,
+      "razorpayOrderId": null,
+      "razorpayPaymentId": null,
+      "provider": "mock",
+      "createdAt": "2026-09-29T11:22:12.443Z"
+    },
+    "exam": {
+      "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+      "title": "Interglade Maths Olympiad 2026",
+      "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+      "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+      "ageGroupMin": 8,
+      "ageGroupMax": 16,
+      "registrationStart": "2026-09-19T11:22:10.679Z",
+      "registrationEnd": "2026-10-19T11:22:10.679Z",
+      "examStart": "2026-09-28T11:22:10.679Z",
+      "examEnd": "2026-10-29T11:22:10.679Z",
+      "durationMinutes": 30,
+      "registrationFee": 499,
+      "currency": "INR",
+      "practiceAttempts": 3,
+      "practiceQuestionCount": 10,
+      "published": true,
+      "phase": "In Progress",
+      "registrationOpen": true,
+      "registeredCount": 0,
+      "levels": [
+        {
+          "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+          "order": 1,
+          "name": "Level 1 — Foundation",
+          "attempts": 5,
+          "durationMinutes": 30,
+          "passPercent": 40,
+          "sections": [
+            {
+              "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+              "category": "Mathematics",
+              "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+              "complexity": "Low",
+              "questionCount": 10,
+              "marksPerQuestion": 1
+            }
+          ],
+          "maxScore": 15
+        }
+      ],
+      "slots": [
+        {
+          "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+          "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+          "startsAt": "2026-09-29T10:22:10.679Z",
+          "endsAt": "2026-10-14T11:22:10.679Z",
+          "capacity": 500,
+          "bookedCount": 0
+        }
+      ],
+      "createdAt": "2026-09-29T11:22:10.680Z"
+    }
+  },
+  "order": {
+    "orderId": "mock_order_52e9e54723faf8f6",
+    "amount": 47106,
+    "currency": "INR",
+    "keyId": null,
+    "provider": "mock"
+  }
+}
+```
+
+#### Payment verify — bad signature (400)
+
+`POST /payments/verify` · auth: student token · **400**
+
+> In mock mode there is no real signature, so this shows the failure response. On success the response is the updated Registration.
+
+Request:
+
+```json
+{
+  "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "razorpayOrderId": "mock_order_52e9e54723faf8f6",
+  "razorpayPaymentId": "pay_Nx2",
+  "razorpaySignature": "9c1f…"
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "Payment verification failed. If money was deducted it will be reconciled automatically.",
+    "code": "BAD_REQUEST"
+  }
+}
+```
+
+#### Complete a mock payment (dev, no Razorpay keys)
+
+`POST /payments/mock-complete` · auth: student token · **200**
+
+Request:
+
+```json
+{
+  "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d"
+}
+```
+
+Response:
+
+```json
+{
+  "id": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "studentId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+  "status": "active",
+  "registeredAt": "2026-09-29T11:22:12.440Z",
+  "slotByLevel": {},
+  "payment": {
+    "id": "7e396aef-9acf-48b5-af62-9c9309086611",
+    "gross": 499,
+    "discount": 99.8,
+    "tax": 71.86,
+    "amount": 471.06,
+    "discountCode": "EARLY20",
+    "status": "paid",
+    "method": "Mock",
+    "razorpayOrderId": null,
+    "razorpayPaymentId": null,
+    "provider": "mock",
+    "createdAt": "2026-09-29T11:22:12.443Z"
+  },
+  "exam": {
+    "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+    "title": "Interglade Maths Olympiad 2026",
+    "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+    "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+    "ageGroupMin": 8,
+    "ageGroupMax": 16,
+    "registrationStart": "2026-09-19T11:22:10.679Z",
+    "registrationEnd": "2026-10-19T11:22:10.679Z",
+    "examStart": "2026-09-28T11:22:10.679Z",
+    "examEnd": "2026-10-29T11:22:10.679Z",
+    "durationMinutes": 30,
+    "registrationFee": 499,
+    "currency": "INR",
+    "practiceAttempts": 3,
+    "practiceQuestionCount": 10,
+    "published": true,
+    "phase": "In Progress",
+    "registrationOpen": true,
+    "registeredCount": 1,
+    "levels": [
+      {
+        "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "order": 1,
+        "name": "Level 1 — Foundation",
+        "attempts": 5,
+        "durationMinutes": 30,
+        "passPercent": 40,
+        "sections": [
+          {
+            "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+            "category": "Mathematics",
+            "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+            "complexity": "Low",
+            "questionCount": 10,
+            "marksPerQuestion": 1
+          }
+        ],
+        "maxScore": 15
+      }
+    ],
+    "slots": [
+      {
+        "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+        "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "startsAt": "2026-09-29T10:22:10.679Z",
+        "endsAt": "2026-10-14T11:22:10.679Z",
+        "capacity": 500,
+        "bookedCount": 0
+      }
+    ],
+    "createdAt": "2026-09-29T11:22:10.680Z"
+  }
+}
+```
+
+#### Register again — already registered (409)
+
+`POST /student/registrations` · auth: student token · **409**
+
+Request:
+
+```json
+{
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e"
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "You are already registered for this exam",
+    "code": "CONFLICT"
+  }
+}
+```
+
+#### Book a slot for a level
+
+`PUT /student/registrations/7552c10d-9cf1-4b6f-95b9-734107f4b42d/slot` · auth: student token · **200**
+
+Request:
+
+```json
+{
+  "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+  "slotId": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4"
+}
+```
+
+Response:
+
+```json
+{
+  "id": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "studentId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+  "status": "active",
+  "registeredAt": "2026-09-29T11:22:12.440Z",
+  "slotByLevel": {
+    "e74dcc72-d766-416b-838b-32c191d38dcc": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4"
+  },
+  "payment": {
+    "id": "7e396aef-9acf-48b5-af62-9c9309086611",
+    "gross": 499,
+    "discount": 99.8,
+    "tax": 71.86,
+    "amount": 471.06,
+    "discountCode": "EARLY20",
+    "status": "paid",
+    "method": "Mock",
+    "razorpayOrderId": null,
+    "razorpayPaymentId": null,
+    "provider": "mock",
+    "createdAt": "2026-09-29T11:22:12.443Z"
+  },
+  "exam": {
+    "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+    "title": "Interglade Maths Olympiad 2026",
+    "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+    "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+    "ageGroupMin": 8,
+    "ageGroupMax": 16,
+    "registrationStart": "2026-09-19T11:22:10.679Z",
+    "registrationEnd": "2026-10-19T11:22:10.679Z",
+    "examStart": "2026-09-28T11:22:10.679Z",
+    "examEnd": "2026-10-29T11:22:10.679Z",
+    "durationMinutes": 30,
+    "registrationFee": 499,
+    "currency": "INR",
+    "practiceAttempts": 3,
+    "practiceQuestionCount": 10,
+    "published": true,
+    "phase": "In Progress",
+    "registrationOpen": true,
+    "registeredCount": 1,
+    "levels": [
+      {
+        "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "order": 1,
+        "name": "Level 1 — Foundation",
+        "attempts": 5,
+        "durationMinutes": 30,
+        "passPercent": 40,
+        "sections": [
+          {
+            "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+            "category": "Mathematics",
+            "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+            "complexity": "Low",
+            "questionCount": 10,
+            "marksPerQuestion": 1
+          }
+        ],
+        "maxScore": 15
+      }
+    ],
+    "slots": [
+      {
+        "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+        "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "startsAt": "2026-09-29T10:22:10.679Z",
+        "endsAt": "2026-10-14T11:22:10.679Z",
+        "capacity": 500,
+        "bookedCount": 1
+      }
+    ],
+    "createdAt": "2026-09-29T11:22:10.680Z"
+  }
+}
+```
+
+### 18.4 Attempts
+
+#### Start (or resume) a practice paper
+
+`POST /attempts` · auth: student token · **201**
+
+Request:
+
+```json
+{
+  "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+  "mode": "practice"
+}
+```
+
+Response:
+
+```json
+{
+  "id": "27e5ac41-178a-4d16-9318-c9e5b686b9ec",
+  "mode": "practice",
+  "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "examTitle": "Interglade Maths Olympiad 2026",
+  "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+  "levelOrder": 1,
+  "levelName": "Level 1 — Foundation",
+  "attemptNumber": 1,
+  "status": "in_progress",
+  "startedAt": "2026-09-29T11:22:12.473Z",
+  "expiresAt": "2026-09-29T11:52:12.473Z",
+  "remainingSeconds": 1799,
+  "submittedAt": null,
+  "questions": [
+    {
+      "position": 1,
+      "text": "What is 6 × 10?",
+      "options": ["30", "60", "59", "120"],
+      "selectedIndex": null,
+      "category": "Mathematics",
+      "complexity": "Low",
+      "marks": 1
+    },
+    {
+      "position": 2,
+      "text": "A box has 9 pencils. How many pencils are in 7 boxes?",
+      "options": ["62", "126", "63", "53"],
+      "selectedIndex": null,
+      "category": "Mathematics",
+      "complexity": "Low",
+      "marks": 1
+    }
+  ],
+  "result": null
+}
+```
+
+#### Resume after refresh
+
+`GET /attempts/27e5ac41-178a-4d16-9318-c9e5b686b9ec` · auth: student token · **200**
+
+Response:
+
+```json
+{
+  "id": "27e5ac41-178a-4d16-9318-c9e5b686b9ec",
+  "mode": "practice",
+  "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "examTitle": "Interglade Maths Olympiad 2026",
+  "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+  "levelOrder": 1,
+  "levelName": "Level 1 — Foundation",
+  "attemptNumber": 1,
+  "status": "in_progress",
+  "startedAt": "2026-09-29T11:22:12.473Z",
+  "expiresAt": "2026-09-29T11:52:12.473Z",
+  "remainingSeconds": 1799,
+  "submittedAt": null,
+  "questions": [
+    {
+      "position": 1,
+      "text": "What is 6 × 10?",
+      "options": ["30", "60", "59", "120"],
+      "selectedIndex": null,
+      "category": "Mathematics",
+      "complexity": "Low",
+      "marks": 1
+    },
+    {
+      "position": 2,
+      "text": "A box has 9 pencils. How many pencils are in 7 boxes?",
+      "options": ["62", "126", "63", "53"],
+      "selectedIndex": null,
+      "category": "Mathematics",
+      "complexity": "Low",
+      "marks": 1
+    }
+  ],
+  "result": null
+}
+```
+
+#### Save one answer
+
+`PUT /attempts/27e5ac41-178a-4d16-9318-c9e5b686b9ec/answers` · auth: student token · **200**
+
+Request:
+
+```json
+{
+  "position": 1,
+  "selectedIndex": 2
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "remainingSeconds": 1799
+}
+```
+
+#### Clear an answer
+
+`PUT /attempts/27e5ac41-178a-4d16-9318-c9e5b686b9ec/answers` · auth: student token · **200**
+
+Request:
+
+```json
+{
+  "position": 2,
+  "selectedIndex": null
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "remainingSeconds": 1799
+}
+```
+
+#### Submit
+
+`POST /attempts/27e5ac41-178a-4d16-9318-c9e5b686b9ec/submit` · auth: student token · **200**
+
+Response:
+
+```json
+{
+  "id": "27e5ac41-178a-4d16-9318-c9e5b686b9ec",
+  "mode": "practice",
+  "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "examTitle": "Interglade Maths Olympiad 2026",
+  "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+  "levelOrder": 1,
+  "levelName": "Level 1 — Foundation",
+  "attemptNumber": 1,
+  "status": "submitted",
+  "startedAt": "2026-09-29T11:22:12.473Z",
+  "expiresAt": "2026-09-29T11:52:12.473Z",
+  "remainingSeconds": 0,
+  "submittedAt": "2026-09-29T11:22:12.488Z",
+  "questions": [
+    {
+      "position": 1,
+      "text": "What is 6 × 10?",
+      "options": ["30", "60", "59", "120"],
+      "selectedIndex": 2,
+      "category": "Mathematics",
+      "complexity": "Low",
+      "marks": 1,
+      "correctIndex": 1,
+      "explanation": "6 × 10 = 60"
+    },
+    {
+      "position": 2,
+      "text": "A box has 9 pencils. How many pencils are in 7 boxes?",
+      "options": ["62", "126", "63", "53"],
+      "selectedIndex": null,
+      "category": "Mathematics",
+      "complexity": "Low",
+      "marks": 1,
+      "correctIndex": 2,
+      "explanation": "9 × 7 = 63"
+    }
+  ],
+  "result": {
+    "score": 0,
+    "maxScore": 10,
+    "percentage": 0,
+    "correct": 0,
+    "wrong": 1,
+    "unanswered": 9,
+    "timeTakenSeconds": 0,
+    "passed": false
+  }
+}
+```
+
+#### Start a real paper
+
+`POST /attempts` · auth: student token · **201**
+
+Request:
+
+```json
+{
+  "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+  "mode": "real"
+}
+```
+
+Response:
+
+```json
+{
+  "id": "eb2d952d-de52-432c-b52c-23b93b7ddf42",
+  "mode": "real",
+  "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "examTitle": "Interglade Maths Olympiad 2026",
+  "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+  "levelOrder": 1,
+  "levelName": "Level 1 — Foundation",
+  "attemptNumber": 1,
+  "status": "in_progress",
+  "startedAt": "2026-09-29T11:22:12.491Z",
+  "expiresAt": "2026-09-29T11:52:12.491Z",
+  "remainingSeconds": 1799,
+  "submittedAt": null,
+  "questions": [
+    {
+      "position": 1,
+      "text": "What is 12 ÷ 2?",
+      "options": ["12", "3", "16", "6"],
+      "selectedIndex": null,
+      "category": "Mathematics",
+      "complexity": "Low",
+      "marks": 1
+    },
+    {
+      "position": 2,
+      "text": "What is 95 − 4?",
+      "options": ["91", "90", "182", "101"],
+      "selectedIndex": null,
+      "category": "Mathematics",
+      "complexity": "Low",
+      "marks": 1
+    }
+  ],
+  "result": null
+}
+```
+
+#### Submit a real paper (scorecard)
+
+`POST /attempts/eb2d952d-de52-432c-b52c-23b93b7ddf42/submit` · auth: student token · **200**
+
+Response:
+
+```json
+{
+  "id": "eb2d952d-de52-432c-b52c-23b93b7ddf42",
+  "mode": "real",
+  "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "examTitle": "Interglade Maths Olympiad 2026",
+  "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+  "levelOrder": 1,
+  "levelName": "Level 1 — Foundation",
+  "attemptNumber": 1,
+  "status": "submitted",
+  "startedAt": "2026-09-29T11:22:12.491Z",
+  "expiresAt": "2026-09-29T11:52:12.491Z",
+  "remainingSeconds": 0,
+  "submittedAt": "2026-09-29T11:22:12.528Z",
+  "questions": [
+    {
+      "position": 1,
+      "text": "What is 12 ÷ 2?",
+      "options": ["12", "3", "16", "6"],
+      "selectedIndex": 3,
+      "category": "Mathematics",
+      "complexity": "Low",
+      "marks": 1,
+      "correctIndex": 3,
+      "explanation": "2 × 6 = 12"
+    },
+    {
+      "position": 2,
+      "text": "What is 95 − 4?",
+      "options": ["91", "90", "182", "101"],
+      "selectedIndex": 0,
+      "category": "Mathematics",
+      "complexity": "Low",
+      "marks": 1,
+      "correctIndex": 0,
+      "explanation": "95 − 4 = 91"
+    }
+  ],
+  "result": {
+    "score": 12,
+    "maxScore": 15,
+    "percentage": 80,
+    "correct": 12,
+    "wrong": 0,
+    "unanswered": 3,
+    "timeTakenSeconds": 0,
+    "passed": true
+  }
+}
+```
+
+#### Answer after submission (409)
+
+`PUT /attempts/eb2d952d-de52-432c-b52c-23b93b7ddf42/answers` · auth: student token · **409**
+
+Request:
+
+```json
+{
+  "position": 1,
+  "selectedIndex": 0
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "This attempt has already been submitted",
+    "code": "CONFLICT"
+  }
+}
+```
+
+#### Real paper at a locked level (400)
+
+`POST /attempts` · auth: student token · **400**
+
+Request:
+
+```json
+{
+  "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "levelId": "b38d635b-2a6b-4c66-b51f-4ec9883b71fc",
+  "mode": "real"
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "Clear Level 2 to unlock this level",
+    "code": "BAD_REQUEST"
+  }
+}
+```
+
+### 18.5 Student (after sitting a paper)
+
+#### Exam workspace
+
+`GET /student/registrations/7552c10d-9cf1-4b6f-95b9-734107f4b42d` · auth: student token · **200**
+
+Response:
+
+```json
+{
+  "id": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+  "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+  "studentId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+  "status": "active",
+  "registeredAt": "2026-09-29T11:22:12.440Z",
+  "slotByLevel": {
+    "e74dcc72-d766-416b-838b-32c191d38dcc": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4"
+  },
+  "payment": {
+    "id": "7e396aef-9acf-48b5-af62-9c9309086611",
+    "gross": 499,
+    "discount": 99.8,
+    "tax": 71.86,
+    "amount": 471.06,
+    "discountCode": "EARLY20",
+    "status": "paid",
+    "method": "Mock",
+    "razorpayOrderId": null,
+    "razorpayPaymentId": null,
+    "provider": "mock",
+    "createdAt": "2026-09-29T11:22:12.443Z"
+  },
+  "exam": {
+    "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+    "title": "Interglade Maths Olympiad 2026",
+    "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+    "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+    "ageGroupMin": 8,
+    "ageGroupMax": 16,
+    "registrationStart": "2026-09-19T11:22:10.679Z",
+    "registrationEnd": "2026-10-19T11:22:10.679Z",
+    "examStart": "2026-09-28T11:22:10.679Z",
+    "examEnd": "2026-10-29T11:22:10.679Z",
+    "durationMinutes": 30,
+    "registrationFee": 499,
+    "currency": "INR",
+    "practiceAttempts": 3,
+    "practiceQuestionCount": 10,
+    "published": true,
+    "phase": "In Progress",
+    "registrationOpen": true,
+    "registeredCount": 1,
+    "levels": [
+      {
+        "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "order": 1,
+        "name": "Level 1 — Foundation",
+        "attempts": 5,
+        "durationMinutes": 30,
+        "passPercent": 40,
+        "sections": [
+          {
+            "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+            "category": "Mathematics",
+            "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+            "complexity": "Low",
+            "questionCount": 10,
+            "marksPerQuestion": 1
+          }
+        ],
+        "maxScore": 15
+      }
+    ],
+    "slots": [
+      {
+        "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+        "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "startsAt": "2026-09-29T10:22:10.679Z",
+        "endsAt": "2026-10-14T11:22:10.679Z",
+        "capacity": 500,
+        "bookedCount": 1
+      }
+    ],
+    "createdAt": "2026-09-29T11:22:10.680Z"
+  },
+  "levels": [
+    {
+      "level": {
+        "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "order": 1,
+        "name": "Level 1 — Foundation",
+        "attempts": 5,
+        "durationMinutes": 30,
+        "passPercent": 40,
+        "sections": [
+          {
+            "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+            "category": "Mathematics",
+            "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+            "complexity": "Low",
+            "questionCount": 10,
+            "marksPerQuestion": 1
+          }
+        ],
+        "maxScore": 15
+      },
+      "unlocked": true,
+      "lockReason": null,
+      "realAttemptsUsed": 1,
+      "realAttemptsLeft": 4,
+      "bestScore": 12,
+      "maxScore": 15,
+      "bestPercentage": 80,
+      "passed": true,
+      "slotId": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+      "realBlockReason": null,
+      "attempts": [
+        {
+          "id": "27e5ac41-178a-4d16-9318-c9e5b686b9ec",
+          "mode": "practice",
+          "attemptNumber": 1,
+          "status": "submitted",
+          "score": 0,
+          "maxScore": 10,
+          "startedAt": "2026-09-29T11:22:12.473Z",
+          "submittedAt": "2026-09-29T11:22:12.488Z",
+          "timeTakenSeconds": 0
+        }
+      ],
+      "inProgressAttemptId": null
+    }
+  ],
+  "practiceAttemptsUsed": 1,
+  "practiceAttemptsLeft": 2,
+  "canAttemptRealNow": false,
+  "realBlockReason": "Book a slot for this level",
+  "myRank": {
+    "rank": 1,
+    "of": 1,
+    "total": 12,
+    "maxTotal": 65
+  }
+}
+```
+
+#### My examinations
+
+`GET /student/registrations` · auth: student token · **200**
+
+Response:
+
+```json
+[
+  {
+    "id": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+    "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+    "studentId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+    "status": "active",
+    "registeredAt": "2026-09-29T11:22:12.440Z",
+    "slotByLevel": {
+      "e74dcc72-d766-416b-838b-32c191d38dcc": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4"
+    },
+    "payment": {
+      "id": "7e396aef-9acf-48b5-af62-9c9309086611",
+      "gross": 499,
+      "discount": 99.8,
+      "tax": 71.86,
+      "amount": 471.06,
+      "discountCode": "EARLY20",
+      "status": "paid",
+      "method": "Mock",
+      "razorpayOrderId": null,
+      "razorpayPaymentId": null,
+      "provider": "mock",
+      "createdAt": "2026-09-29T11:22:12.443Z"
+    },
+    "exam": {
+      "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+      "title": "Interglade Maths Olympiad 2026",
+      "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+      "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+      "ageGroupMin": 8,
+      "ageGroupMax": 16,
+      "registrationStart": "2026-09-19T11:22:10.679Z",
+      "registrationEnd": "2026-10-19T11:22:10.679Z",
+      "examStart": "2026-09-28T11:22:10.679Z",
+      "examEnd": "2026-10-29T11:22:10.679Z",
+      "durationMinutes": 30,
+      "registrationFee": 499,
+      "currency": "INR",
+      "practiceAttempts": 3,
+      "practiceQuestionCount": 10,
+      "published": true,
+      "phase": "In Progress",
+      "registrationOpen": true,
+      "registeredCount": 1,
+      "levels": [
+        {
+          "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+          "order": 1,
+          "name": "Level 1 — Foundation",
+          "attempts": 5,
+          "durationMinutes": 30,
+          "passPercent": 40,
+          "sections": [
+            {
+              "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+              "category": "Mathematics",
+              "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+              "complexity": "Low",
+              "questionCount": 10,
+              "marksPerQuestion": 1
+            }
+          ],
+          "maxScore": 15
+        }
+      ],
+      "slots": [
+        {
+          "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+          "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+          "startsAt": "2026-09-29T10:22:10.679Z",
+          "endsAt": "2026-10-14T11:22:10.679Z",
+          "capacity": 500,
+          "bookedCount": 1
+        }
+      ],
+      "createdAt": "2026-09-29T11:22:10.680Z"
+    }
+  }
+]
+```
+
+#### Dashboard
+
+`GET /student/dashboard` · auth: student token · **200**
+
+Response:
+
+```json
+{
+  "registrations": [
+    {
+      "id": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+      "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+      "studentId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+      "status": "active",
+      "registeredAt": "2026-09-29T11:22:12.440Z",
+      "slotByLevel": {
+        "e74dcc72-d766-416b-838b-32c191d38dcc": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4"
+      },
+      "payment": {
+        "id": "7e396aef-9acf-48b5-af62-9c9309086611",
+        "gross": 499,
+        "discount": 99.8,
+        "tax": 71.86,
+        "amount": 471.06,
+        "discountCode": "EARLY20",
+        "status": "paid",
+        "method": "Mock",
+        "razorpayOrderId": null,
+        "razorpayPaymentId": null,
+        "provider": "mock",
+        "createdAt": "2026-09-29T11:22:12.443Z"
+      },
+      "exam": {
+        "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+        "title": "Interglade Maths Olympiad 2026",
+        "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+        "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+        "ageGroupMin": 8,
+        "ageGroupMax": 16,
+        "registrationStart": "2026-09-19T11:22:10.679Z",
+        "registrationEnd": "2026-10-19T11:22:10.679Z",
+        "examStart": "2026-09-28T11:22:10.679Z",
+        "examEnd": "2026-10-29T11:22:10.679Z",
+        "durationMinutes": 30,
+        "registrationFee": 499,
+        "currency": "INR",
+        "practiceAttempts": 3,
+        "practiceQuestionCount": 10,
+        "published": true,
+        "phase": "In Progress",
+        "registrationOpen": true,
+        "registeredCount": 1,
+        "levels": [
+          {
+            "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+            "order": 1,
+            "name": "Level 1 — Foundation",
+            "attempts": 5,
+            "durationMinutes": 30,
+            "passPercent": 40,
+            "sections": [
+              {
+                "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+                "category": "Mathematics",
+                "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+                "complexity": "Low",
+                "questionCount": 10,
+                "marksPerQuestion": 1
+              }
+            ],
+            "maxScore": 15
+          }
+        ],
+        "slots": [
+          {
+            "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+            "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+            "startsAt": "2026-09-29T10:22:10.679Z",
+            "endsAt": "2026-10-14T11:22:10.679Z",
+            "capacity": 500,
+            "bookedCount": 1
+          }
+        ],
+        "createdAt": "2026-09-29T11:22:10.680Z"
+      }
+    }
+  ],
+  "stats": {
+    "registered": 1,
+    "inProgress": 1,
+    "sat": 1,
+    "practiceTaken": 1,
+    "averageScorePercent": 80,
+    "bestRank": {
+      "rank": 1,
+      "of": 1,
+      "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e"
+    }
+  }
+}
+```
+
+#### Leaderboard
+
+`GET /student/exams/276db0fb-c136-42f7-8abc-1469431b0e6e/leaderboard` · auth: student token · **200**
+
+Response:
+
+```json
+{
+  "exam": {
+    "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+    "title": "Interglade Maths Olympiad 2026",
+    "phase": "In Progress"
+  },
+  "entries": [
+    {
+      "rank": 1,
+      "userId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+      "name": "Asha Kumar",
+      "city": "Pune",
+      "perLevel": {
+        "e74dcc72-d766-416b-838b-32c191d38dcc": 12
+      },
+      "total": 12,
+      "maxTotal": 65,
+      "levelsCleared": 1,
+      "timeSeconds": 0,
+      "isMe": true
+    }
+  ],
+  "me": {
+    "rank": 1,
+    "userId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+    "name": "Asha Kumar",
+    "city": "Pune",
+    "perLevel": {
+      "e74dcc72-d766-416b-838b-32c191d38dcc": 12
+    },
+    "total": 12,
+    "maxTotal": 65,
+    "levelsCleared": 1,
+    "timeSeconds": 0,
+    "isMe": true
+  }
+}
+```
+
+#### Payments & receipts
+
+`GET /student/payments` · auth: student token · **200**
+
+Response:
+
+```json
+[
+  {
+    "id": "7e396aef-9acf-48b5-af62-9c9309086611",
+    "gross": 499,
+    "discount": 99.8,
+    "tax": 71.86,
+    "amount": 471.06,
+    "discountCode": "EARLY20",
+    "status": "paid",
+    "method": "Mock",
+    "razorpayOrderId": null,
+    "razorpayPaymentId": null,
+    "provider": "mock",
+    "createdAt": "2026-09-29T11:22:12.443Z",
+    "registrationId": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+    "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+    "examTitle": "Interglade Maths Olympiad 2026"
+  }
+]
+```
+
+### 18.6 Payments
+
+#### Checkout config
+
+`GET /payments/config` · auth: none · **200**
+
+Response:
+
+```json
+{
+  "provider": "mock",
+  "keyId": null,
+  "currency": "INR",
+  "merchantName": "Interglade Talent",
+  "gstPercent": 18,
+  "enabled": true
+}
+```
+
+#### Admin — save payment settings
+
+`PUT /admin/settings/payment` · auth: admin token · **200**
+
+> Blank keyId keeps mock mode. Blank secrets keep the saved value.
+
+Request:
+
+```json
+{
+  "provider": "Razorpay",
+  "keyId": "",
+  "keySecret": "",
+  "webhookSecret": "whsec_demo",
+  "currency": "INR",
+  "merchantName": "Interglade Talent",
+  "merchantEmail": "payments@interglade.com",
+  "gstPercent": 18,
+  "testMode": true,
+  "enabled": true
+}
+```
+
+Response:
+
+```json
+{
+  "provider": "Razorpay",
+  "keyId": null,
+  "hasKeySecret": false,
+  "hasWebhookSecret": true,
+  "currency": "INR",
+  "merchantName": "Interglade Talent",
+  "merchantEmail": "payments@interglade.com",
+  "gstPercent": 18,
+  "testMode": true,
+  "enabled": true,
+  "updatedAt": "2026-09-29T11:22:12.559Z"
+}
+```
+
+#### Razorpay webhook
+
+`POST /payments/webhook` · auth: none · **200**
+
+> Header `X-Razorpay-Signature` = HMAC-SHA256 of the raw body with the webhook secret.
+
+Request:
+
+```json
+{
+  "event": "payment.captured",
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_Nx2",
+        "order_id": "order_Nx1",
+        "method": "upi"
+      }
+    }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true
+}
+```
+
+#### Admin — payment settings (secrets never returned)
+
+`GET /admin/settings/payment` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "provider": "Razorpay",
+  "keyId": null,
+  "hasKeySecret": false,
+  "hasWebhookSecret": true,
+  "currency": "INR",
+  "merchantName": "Interglade Talent",
+  "merchantEmail": "payments@interglade.com",
+  "gstPercent": 18,
+  "testMode": true,
+  "enabled": true,
+  "updatedAt": "2026-09-29T11:22:12.559Z"
+}
+```
+
+#### Admin — Razorpay key does not match the mode (400)
+
+`PUT /admin/settings/payment` · auth: admin token · **400**
+
+Request:
+
+```json
+{
+  "provider": "Razorpay",
+  "keyId": "rzp_live_ABC123",
+  "keySecret": "secret",
+  "currency": "INR",
+  "merchantName": "Interglade Talent",
+  "gstPercent": 18,
+  "testMode": true,
+  "enabled": true
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "Validation failed",
+    "code": "BAD_REQUEST",
+    "details": {
+      "keyId": ["Key ID for test mode should start with \"rzp_test_\""]
+    }
+  }
+}
+```
+
+### 18.7 Admin — dashboard
+
+#### Summary tiles
+
+`GET /admin/dashboard/summary` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "totalStudents": 1,
+  "newStudentsThisMonth": 1,
+  "totalRevenue": 471.06,
+  "registrations": 1,
+  "papersSubmitted": 1,
+  "practicePapersTaken": 1,
+  "exams": {
+    "total": 3,
+    "draft": 0,
+    "future": 1,
+    "inProgress": 1,
+    "completed": 1
+  },
+  "revenueByPhase": {
+    "Future": 0,
+    "In Progress": 471.06,
+    "Completed": 0
+  }
+}
+```
+
+#### Drill-down by status
+
+`GET /admin/dashboard/exams?status=in_progress` · auth: admin token · **200**
+
+Response:
+
+```json
+[
+  {
+    "exam": {
+      "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+      "title": "Interglade Maths Olympiad 2026",
+      "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+      "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+      "ageGroupMin": 8,
+      "ageGroupMax": 16,
+      "registrationStart": "2026-09-19T11:22:10.679Z",
+      "registrationEnd": "2026-10-19T11:22:10.679Z",
+      "examStart": "2026-09-28T11:22:10.679Z",
+      "examEnd": "2026-10-29T11:22:10.679Z",
+      "durationMinutes": 30,
+      "registrationFee": 499,
+      "currency": "INR",
+      "practiceAttempts": 3,
+      "practiceQuestionCount": 10,
+      "published": true,
+      "phase": "In Progress",
+      "registrationOpen": true,
+      "registeredCount": 1,
+      "levels": [
+        {
+          "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+          "order": 1,
+          "name": "Level 1 — Foundation",
+          "attempts": 5,
+          "durationMinutes": 30,
+          "passPercent": 40,
+          "sections": [
+            {
+              "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+              "category": "Mathematics",
+              "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+              "complexity": "Low",
+              "questionCount": 10,
+              "marksPerQuestion": 1
+            }
+          ],
+          "maxScore": 15
+        }
+      ],
+      "slots": [
+        {
+          "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+          "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+          "startsAt": "2026-09-29T10:22:10.679Z",
+          "endsAt": "2026-10-14T11:22:10.679Z",
+          "capacity": 500,
+          "bookedCount": 1
+        }
+      ],
+      "createdAt": "2026-09-29T11:22:10.680Z"
+    },
+    "registeredCount": 1,
+    "revenue": 471.06,
+    "discountGiven": 99.8,
+    "papersSubmitted": 1,
+    "averageScorePercent": 80,
+    "slotsBooked": 1,
+    "slotCapacity": 2500,
+    "topStudents": [
+      {
+        "rank": 1,
+        "userId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+        "name": "Asha Kumar",
+        "city": "Pune",
+        "perLevel": {
+          "e74dcc72-d766-416b-838b-32c191d38dcc": 12
+        },
+        "total": 12,
+        "maxTotal": 65,
+        "levelsCleared": 1,
+        "timeSeconds": 0,
+        "isMe": false
+      }
+    ]
+  }
+]
+```
+
+#### Student token on an admin route (403)
+
+`GET /admin/dashboard/summary` · auth: student token · **403**
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "You do not have access to this resource",
+    "code": "FORBIDDEN"
+  }
+}
+```
+
+### 18.8 Admin — examinations & slots
+
+#### List exams
+
+`GET /admin/exams?status=in_progress` · auth: admin token · **200**
+
+Response:
+
+```json
+[
+  {
+    "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+    "title": "Interglade Maths Olympiad 2026",
+    "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+    "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+    "ageGroupMin": 8,
+    "ageGroupMax": 16,
+    "registrationStart": "2026-09-19T11:22:10.679Z",
+    "registrationEnd": "2026-10-19T11:22:10.679Z",
+    "examStart": "2026-09-28T11:22:10.679Z",
+    "examEnd": "2026-10-29T11:22:10.679Z",
+    "durationMinutes": 30,
+    "registrationFee": 499,
+    "currency": "INR",
+    "practiceAttempts": 3,
+    "practiceQuestionCount": 10,
+    "published": true,
+    "phase": "In Progress",
+    "registrationOpen": true,
+    "registeredCount": 1,
+    "levels": [
+      {
+        "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "order": 1,
+        "name": "Level 1 — Foundation",
+        "attempts": 5,
+        "durationMinutes": 30,
+        "passPercent": 40,
+        "sections": [
+          {
+            "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+            "category": "Mathematics",
+            "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+            "complexity": "Low",
+            "questionCount": 10,
+            "marksPerQuestion": 1
+          }
+        ],
+        "maxScore": 15
+      }
+    ],
+    "slots": [
+      {
+        "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+        "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "startsAt": "2026-09-29T10:22:10.679Z",
+        "endsAt": "2026-10-14T11:22:10.679Z",
+        "capacity": 500,
+        "bookedCount": 1
+      }
+    ],
+    "createdAt": "2026-09-29T11:22:10.680Z"
+  }
+]
+```
+
+#### Create — validation error (400)
+
+`POST /admin/exams` · auth: admin token · **400**
+
+Request:
+
+```json
+{
+  "title": "Interglade Science Olympiad 2026",
+  "description": "Two-level science challenge",
+  "award": "Gold medal + ₹5,000",
+  "ageGroupMin": null,
+  "ageGroupMax": null,
+  "registrationStart": "2026-09-28T11:22:12.000Z",
+  "registrationEnd": "2026-10-09T11:22:12.000Z",
+  "examStart": "2026-10-11T11:22:12.000Z",
+  "examEnd": "2026-10-10T11:22:12.000Z",
+  "durationMinutes": 45,
+  "registrationFee": 299,
+  "practiceAttempts": 3,
+  "practiceQuestionCount": 10,
+  "levels": [
+    {
+      "order": 1,
+      "name": "Level 1 — Foundation",
+      "attempts": 5,
+      "durationMinutes": 30,
+      "passPercent": 40,
+      "sections": [
+        {
+          "category": "Astrology",
+          "complexity": "Low",
+          "questionCount": 0
+        }
+      ]
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "Validation failed",
+    "code": "BAD_REQUEST",
+    "details": {
+      "levels.0.sections.0.questionCount": ["Question count must be at least 1"],
+      "examEnd": ["Exam end must be after start"]
+    }
+  }
+}
+```
+
+#### Create exam
+
+`POST /admin/exams` · auth: admin token · **201**
+
+Request:
+
+```json
+{
+  "title": "Interglade Science Olympiad 2026",
+  "description": "Two-level science challenge",
+  "award": "Gold medal + ₹5,000",
+  "ageGroupMin": null,
+  "ageGroupMax": null,
+  "registrationStart": "2026-09-28T11:22:12.000Z",
+  "registrationEnd": "2026-10-09T11:22:12.000Z",
+  "examStart": "2026-10-11T11:22:12.000Z",
+  "examEnd": "2026-10-19T11:22:12.000Z",
+  "durationMinutes": 45,
+  "registrationFee": 299,
+  "practiceAttempts": 3,
+  "practiceQuestionCount": 10,
+  "levels": [
+    {
+      "order": 1,
+      "name": "Level 1 — Foundation",
+      "attempts": 5,
+      "durationMinutes": 30,
+      "passPercent": 40,
+      "sections": [
+        {
+          "category": "Science",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        },
+        {
+          "category": "Mathematics",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        }
+      ]
+    },
+    {
+      "order": 2,
+      "name": "Level 2 — Advanced",
+      "attempts": 3,
+      "durationMinutes": 45,
+      "passPercent": 50,
+      "sections": [
+        {
+          "category": "Science",
+          "complexity": "High",
+          "questionCount": 5,
+          "marksPerQuestion": 2
+        }
+      ]
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "id": "9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b",
+  "title": "Interglade Science Olympiad 2026",
+  "description": "Two-level science challenge",
+  "award": "Gold medal + ₹5,000",
+  "ageGroupMin": null,
+  "ageGroupMax": null,
+  "registrationStart": "2026-09-28T11:22:12.000Z",
+  "registrationEnd": "2026-10-09T11:22:12.000Z",
+  "examStart": "2026-10-11T11:22:12.000Z",
+  "examEnd": "2026-10-19T11:22:12.000Z",
+  "durationMinutes": 45,
+  "registrationFee": 299,
+  "currency": "INR",
+  "practiceAttempts": 3,
+  "practiceQuestionCount": 10,
+  "published": false,
+  "phase": "Draft",
+  "registrationOpen": false,
+  "registeredCount": 0,
+  "levels": [
+    {
+      "id": "133ac2be-aa7f-4eac-ac52-3f33e7d62043",
+      "order": 1,
+      "name": "Level 1 — Foundation",
+      "attempts": 5,
+      "durationMinutes": 30,
+      "passPercent": 40,
+      "sections": [
+        {
+          "id": "66c56452-1d22-40d5-90c7-4bc8b1420b98",
+          "category": "Science",
+          "categoryId": "e510b71c-1b10-4763-af8e-a41e7a93ad7d",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        },
+        {
+          "id": "40fe94a9-d7a2-458a-8979-6b75164d8ded",
+          "category": "Mathematics",
+          "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "95e0eb52-bc9a-441d-aedb-23480afd8538",
+      "order": 2,
+      "name": "Level 2 — Advanced",
+      "attempts": 3,
+      "durationMinutes": 45,
+      "passPercent": 50,
+      "sections": [
+        {
+          "id": "17c1b37e-e8bc-4923-897a-293b439f38fb",
+          "category": "Science",
+          "categoryId": "e510b71c-1b10-4763-af8e-a41e7a93ad7d",
+          "complexity": "High",
+          "questionCount": 5,
+          "marksPerQuestion": 2
+        }
+      ],
+      "maxScore": 10
+    }
+  ],
+  "slots": [],
+  "createdAt": "2026-09-29T11:22:12.576Z"
+}
+```
+
+#### Get exam
+
+`GET /admin/exams/9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "id": "9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b",
+  "title": "Interglade Science Olympiad 2026",
+  "description": "Two-level science challenge",
+  "award": "Gold medal + ₹5,000",
+  "ageGroupMin": null,
+  "ageGroupMax": null,
+  "registrationStart": "2026-09-28T11:22:12.000Z",
+  "registrationEnd": "2026-10-09T11:22:12.000Z",
+  "examStart": "2026-10-11T11:22:12.000Z",
+  "examEnd": "2026-10-19T11:22:12.000Z",
+  "durationMinutes": 45,
+  "registrationFee": 299,
+  "currency": "INR",
+  "practiceAttempts": 3,
+  "practiceQuestionCount": 10,
+  "published": false,
+  "phase": "Draft",
+  "registrationOpen": false,
+  "registeredCount": 0,
+  "levels": [
+    {
+      "id": "133ac2be-aa7f-4eac-ac52-3f33e7d62043",
+      "order": 1,
+      "name": "Level 1 — Foundation",
+      "attempts": 5,
+      "durationMinutes": 30,
+      "passPercent": 40,
+      "sections": [
+        {
+          "id": "66c56452-1d22-40d5-90c7-4bc8b1420b98",
+          "category": "Science",
+          "categoryId": "e510b71c-1b10-4763-af8e-a41e7a93ad7d",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        },
+        {
+          "id": "40fe94a9-d7a2-458a-8979-6b75164d8ded",
+          "category": "Mathematics",
+          "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "95e0eb52-bc9a-441d-aedb-23480afd8538",
+      "order": 2,
+      "name": "Level 2 — Advanced",
+      "attempts": 3,
+      "durationMinutes": 45,
+      "passPercent": 50,
+      "sections": [
+        {
+          "id": "17c1b37e-e8bc-4923-897a-293b439f38fb",
+          "category": "Science",
+          "categoryId": "e510b71c-1b10-4763-af8e-a41e7a93ad7d",
+          "complexity": "High",
+          "questionCount": 5,
+          "marksPerQuestion": 2
+        }
+      ],
+      "maxScore": 10
+    }
+  ],
+  "slots": [],
+  "createdAt": "2026-09-29T11:22:12.576Z"
+}
+```
+
+#### Update exam (levels/sections with ids are kept)
+
+`PUT /admin/exams/9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b` · auth: admin token · **200**
+
+Request:
+
+```json
+{
+  "title": "Interglade Science Olympiad 2026 (Updated)",
+  "description": "Two-level science challenge",
+  "award": "Gold medal + ₹5,000",
+  "ageGroupMin": null,
+  "ageGroupMax": null,
+  "registrationStart": "2026-09-28T11:22:12.000Z",
+  "registrationEnd": "2026-10-09T11:22:12.000Z",
+  "examStart": "2026-10-11T11:22:12.000Z",
+  "examEnd": "2026-10-19T11:22:12.000Z",
+  "durationMinutes": 45,
+  "registrationFee": 299,
+  "practiceAttempts": 3,
+  "practiceQuestionCount": 10,
+  "levels": [
+    {
+      "order": 1,
+      "name": "Level 1 — Foundation",
+      "attempts": 5,
+      "durationMinutes": 30,
+      "passPercent": 40,
+      "sections": [
+        {
+          "id": "66c56452-1d22-40d5-90c7-4bc8b1420b98",
+          "category": "Science",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        },
+        {
+          "id": "40fe94a9-d7a2-458a-8979-6b75164d8ded",
+          "category": "Mathematics",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        }
+      ],
+      "id": "133ac2be-aa7f-4eac-ac52-3f33e7d62043"
+    },
+    {
+      "order": 2,
+      "name": "Level 2 — Advanced",
+      "attempts": 3,
+      "durationMinutes": 45,
+      "passPercent": 50,
+      "sections": [
+        {
+          "id": "17c1b37e-e8bc-4923-897a-293b439f38fb",
+          "category": "Science",
+          "complexity": "High",
+          "questionCount": 8,
+          "marksPerQuestion": 2
+        }
+      ],
+      "id": "95e0eb52-bc9a-441d-aedb-23480afd8538"
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "id": "9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b",
+  "title": "Interglade Science Olympiad 2026 (Updated)",
+  "description": "Two-level science challenge",
+  "award": "Gold medal + ₹5,000",
+  "ageGroupMin": null,
+  "ageGroupMax": null,
+  "registrationStart": "2026-09-28T11:22:12.000Z",
+  "registrationEnd": "2026-10-09T11:22:12.000Z",
+  "examStart": "2026-10-11T11:22:12.000Z",
+  "examEnd": "2026-10-19T11:22:12.000Z",
+  "durationMinutes": 45,
+  "registrationFee": 299,
+  "currency": "INR",
+  "practiceAttempts": 3,
+  "practiceQuestionCount": 10,
+  "published": false,
+  "phase": "Draft",
+  "registrationOpen": false,
+  "registeredCount": 0,
+  "levels": [
+    {
+      "id": "133ac2be-aa7f-4eac-ac52-3f33e7d62043",
+      "order": 1,
+      "name": "Level 1 — Foundation",
+      "attempts": 5,
+      "durationMinutes": 30,
+      "passPercent": 40,
+      "sections": [
+        {
+          "id": "66c56452-1d22-40d5-90c7-4bc8b1420b98",
+          "category": "Science",
+          "categoryId": "e510b71c-1b10-4763-af8e-a41e7a93ad7d",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        },
+        {
+          "id": "40fe94a9-d7a2-458a-8979-6b75164d8ded",
+          "category": "Mathematics",
+          "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "95e0eb52-bc9a-441d-aedb-23480afd8538",
+      "order": 2,
+      "name": "Level 2 — Advanced",
+      "attempts": 3,
+      "durationMinutes": 45,
+      "passPercent": 50,
+      "sections": [
+        {
+          "id": "17c1b37e-e8bc-4923-897a-293b439f38fb",
+          "category": "Science",
+          "categoryId": "e510b71c-1b10-4763-af8e-a41e7a93ad7d",
+          "complexity": "High",
+          "questionCount": 8,
+          "marksPerQuestion": 2
+        }
+      ],
+      "maxScore": 16
+    }
+  ],
+  "slots": [],
+  "createdAt": "2026-09-29T11:22:12.576Z"
+}
+```
+
+#### Create a slot
+
+`POST /admin/exams/9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b/slots` · auth: admin token · **201**
+
+Request:
+
+```json
+{
+  "levelId": "133ac2be-aa7f-4eac-ac52-3f33e7d62043",
+  "startsAt": "2026-10-11T11:22:12.000Z",
+  "capacity": 60
+}
+```
+
+Response:
+
+```json
+{
+  "id": "a41afb37-3ad3-43c3-9b80-816a6c6dcf8f",
+  "levelId": "133ac2be-aa7f-4eac-ac52-3f33e7d62043",
+  "startsAt": "2026-10-11T11:22:12.000Z",
+  "endsAt": "2026-10-11T11:52:12.000Z",
+  "capacity": 60,
+  "bookedCount": 0,
+  "examId": "9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b"
+}
+```
+
+#### Update a slot
+
+`PUT /admin/slots/a41afb37-3ad3-43c3-9b80-816a6c6dcf8f` · auth: admin token · **200**
+
+Request:
+
+```json
+{
+  "levelId": "133ac2be-aa7f-4eac-ac52-3f33e7d62043",
+  "startsAt": "2026-10-11T11:22:12.000Z",
+  "endsAt": "2026-10-12T11:22:12.000Z",
+  "capacity": 80
+}
+```
+
+Response:
+
+```json
+{
+  "id": "a41afb37-3ad3-43c3-9b80-816a6c6dcf8f",
+  "levelId": "133ac2be-aa7f-4eac-ac52-3f33e7d62043",
+  "startsAt": "2026-10-11T11:22:12.000Z",
+  "endsAt": "2026-10-12T11:22:12.000Z",
+  "capacity": 80,
+  "bookedCount": 0,
+  "examId": "9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b"
+}
+```
+
+#### Create a second slot
+
+`POST /admin/exams/9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b/slots` · auth: admin token · **201**
+
+Request:
+
+```json
+{
+  "levelId": "95e0eb52-bc9a-441d-aedb-23480afd8538",
+  "startsAt": "2026-10-13T11:22:12.000Z",
+  "capacity": 40
+}
+```
+
+Response:
+
+```json
+{
+  "id": "542b1784-8ddf-4bbe-89fe-a18dc2f61257",
+  "levelId": "95e0eb52-bc9a-441d-aedb-23480afd8538",
+  "startsAt": "2026-10-13T11:22:12.000Z",
+  "endsAt": "2026-10-13T12:07:12.000Z",
+  "capacity": 40,
+  "bookedCount": 0,
+  "examId": "9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b"
+}
+```
+
+#### Delete a slot
+
+`DELETE /admin/slots/542b1784-8ddf-4bbe-89fe-a18dc2f61257` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "ok": true
+}
+```
+
+#### Slot outside the exam window (400)
+
+`POST /admin/exams/9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b/slots` · auth: admin token · **400**
+
+Request:
+
+```json
+{
+  "levelId": "133ac2be-aa7f-4eac-ac52-3f33e7d62043",
+  "startsAt": "2026-09-30T11:22:12.000Z",
+  "capacity": 10
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "Validation failed",
+    "code": "BAD_REQUEST",
+    "details": {
+      "startsAt": ["Slot must fall within the exam window"]
+    }
+  }
+}
+```
+
+#### Publish
+
+`POST /admin/exams/9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b/publish` · auth: admin token · **200**
+
+Request:
+
+```json
+{
+  "isPublished": true
+}
+```
+
+Response:
+
+```json
+{
+  "id": "9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b",
+  "title": "Interglade Science Olympiad 2026 (Updated)",
+  "description": "Two-level science challenge",
+  "award": "Gold medal + ₹5,000",
+  "ageGroupMin": null,
+  "ageGroupMax": null,
+  "registrationStart": "2026-09-28T11:22:12.000Z",
+  "registrationEnd": "2026-10-09T11:22:12.000Z",
+  "examStart": "2026-10-11T11:22:12.000Z",
+  "examEnd": "2026-10-19T11:22:12.000Z",
+  "durationMinutes": 45,
+  "registrationFee": 299,
+  "currency": "INR",
+  "practiceAttempts": 3,
+  "practiceQuestionCount": 10,
+  "published": true,
+  "phase": "Future",
+  "registrationOpen": true,
+  "registeredCount": 0,
+  "levels": [
+    {
+      "id": "133ac2be-aa7f-4eac-ac52-3f33e7d62043",
+      "order": 1,
+      "name": "Level 1 — Foundation",
+      "attempts": 5,
+      "durationMinutes": 30,
+      "passPercent": 40,
+      "sections": [
+        {
+          "id": "66c56452-1d22-40d5-90c7-4bc8b1420b98",
+          "category": "Science",
+          "categoryId": "e510b71c-1b10-4763-af8e-a41e7a93ad7d",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        },
+        {
+          "id": "40fe94a9-d7a2-458a-8979-6b75164d8ded",
+          "category": "Mathematics",
+          "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+          "complexity": "Low",
+          "questionCount": 5,
+          "marksPerQuestion": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "95e0eb52-bc9a-441d-aedb-23480afd8538",
+      "order": 2,
+      "name": "Level 2 — Advanced",
+      "attempts": 3,
+      "durationMinutes": 45,
+      "passPercent": 50,
+      "sections": [
+        {
+          "id": "17c1b37e-e8bc-4923-897a-293b439f38fb",
+          "category": "Science",
+          "categoryId": "e510b71c-1b10-4763-af8e-a41e7a93ad7d",
+          "complexity": "High",
+          "questionCount": 8,
+          "marksPerQuestion": 2
+        }
+      ],
+      "maxScore": 16
+    }
+  ],
+  "slots": [
+    {
+      "id": "a41afb37-3ad3-43c3-9b80-816a6c6dcf8f",
+      "levelId": "133ac2be-aa7f-4eac-ac52-3f33e7d62043",
+      "startsAt": "2026-10-11T11:22:12.000Z",
+      "endsAt": "2026-10-12T11:22:12.000Z",
+      "capacity": 80,
+      "bookedCount": 0
+    }
+  ],
+  "createdAt": "2026-09-29T11:22:12.576Z"
+}
+```
+
+#### Registrations for an exam
+
+`GET /admin/exams/276db0fb-c136-42f7-8abc-1469431b0e6e/registrations` · auth: admin token · **200**
+
+Response:
+
+```json
+[
+  {
+    "id": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+    "student": {
+      "id": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+      "name": "Asha Kumar",
+      "email": "asha@example.com",
+      "phone": "+91 9876543210",
+      "city": "Pune",
+      "age": 13
+    },
+    "registeredAt": "2026-09-29T11:22:12.440Z",
+    "slotByLevel": {
+      "e74dcc72-d766-416b-838b-32c191d38dcc": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4"
+    },
+    "amountPaid": 471.06,
+    "discountCode": "EARLY20",
+    "paymentStatus": "paid"
+  }
+]
+```
+
+#### Exam leaderboard
+
+`GET /admin/exams/276db0fb-c136-42f7-8abc-1469431b0e6e/leaderboard` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "exam": {
+    "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+    "title": "Interglade Maths Olympiad 2026",
+    "phase": "In Progress"
+  },
+  "entries": [
+    {
+      "rank": 1,
+      "userId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+      "name": "Asha Kumar",
+      "city": "Pune",
+      "perLevel": {
+        "e74dcc72-d766-416b-838b-32c191d38dcc": 12
+      },
+      "total": 12,
+      "maxTotal": 65,
+      "levelsCleared": 1,
+      "timeSeconds": 0,
+      "isMe": false
+    }
+  ],
+  "me": null
+}
+```
+
+#### Exam report
+
+`GET /admin/exams/276db0fb-c136-42f7-8abc-1469431b0e6e/report` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "exam": {
+    "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+    "title": "Interglade Maths Olympiad 2026",
+    "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+    "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+    "ageGroupMin": 8,
+    "ageGroupMax": 16,
+    "registrationStart": "2026-09-19T11:22:10.679Z",
+    "registrationEnd": "2026-10-19T11:22:10.679Z",
+    "examStart": "2026-09-28T11:22:10.679Z",
+    "examEnd": "2026-10-29T11:22:10.679Z",
+    "durationMinutes": 30,
+    "registrationFee": 499,
+    "currency": "INR",
+    "practiceAttempts": 3,
+    "practiceQuestionCount": 10,
+    "published": true,
+    "phase": "In Progress",
+    "registrationOpen": true,
+    "registeredCount": 1,
+    "levels": [
+      {
+        "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "order": 1,
+        "name": "Level 1 — Foundation",
+        "attempts": 5,
+        "durationMinutes": 30,
+        "passPercent": 40,
+        "sections": [
+          {
+            "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+            "category": "Mathematics",
+            "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+            "complexity": "Low",
+            "questionCount": 10,
+            "marksPerQuestion": 1
+          }
+        ],
+        "maxScore": 15
+      }
+    ],
+    "slots": [
+      {
+        "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+        "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+        "startsAt": "2026-09-29T10:22:10.679Z",
+        "endsAt": "2026-10-14T11:22:10.679Z",
+        "capacity": 500,
+        "bookedCount": 1
+      }
+    ],
+    "createdAt": "2026-09-29T11:22:10.680Z"
+  },
+  "registeredCount": 1,
+  "revenue": 471.06,
+  "discountGiven": 99.8,
+  "papersSubmitted": 1,
+  "averageScorePercent": 80,
+  "slotsBooked": 1,
+  "slotCapacity": 2500,
+  "topStudents": [
+    {
+      "rank": 1,
+      "userId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+      "name": "Asha Kumar",
+      "city": "Pune",
+      "perLevel": {
+        "e74dcc72-d766-416b-838b-32c191d38dcc": 12
+      },
+      "total": 12,
+      "maxTotal": 65,
+      "levelsCleared": 1,
+      "timeSeconds": 0,
+      "isMe": false
+    }
+  ]
+}
+```
+
+#### Delete an exam with registrations (409)
+
+`DELETE /admin/exams/276db0fb-c136-42f7-8abc-1469431b0e6e` · auth: admin token · **409**
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "This exam has registrations and cannot be deleted. Unpublish it instead.",
+    "code": "CONFLICT"
+  }
+}
+```
+
+#### Delete an exam
+
+`DELETE /admin/exams/9a9dea6e-22a0-4a8b-a6dc-84f90fe9378b` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "ok": true
+}
+```
+
+### 18.9 Admin — students & admins
+
+#### Create a student (offline sign-up)
+
+`POST /admin/students` · auth: admin token · **201**
+
+Request:
+
+```json
+{
+  "name": "Ravi Sharma",
+  "phone": "+91 9123456780",
+  "password": "Secret123",
+  "dob": "2012-08-15",
+  "city": "Nashik",
+  "school": "Kendriya Vidyalaya"
+}
+```
+
+Response:
+
+```json
+{
+  "user": {
+    "id": "b60f7acf-fb86-4855-a47b-c738f658c406",
+    "role": "student",
+    "name": "Ravi Sharma",
+    "email": null,
+    "phone": "+91 9123456780",
+    "dob": "2012-08-15",
+    "gender": null,
+    "school": "Kendriya Vidyalaya",
+    "grade": null,
+    "city": "Nashik",
+    "state": null,
+    "guardianName": null,
+    "guardianPhone": null,
+    "createdAt": "2026-09-29T11:22:12.695Z"
+  }
+}
+```
+
+#### Edit a student (any subset)
+
+`PATCH /admin/students/b60f7acf-fb86-4855-a47b-c738f658c406` · auth: admin token · **200**
+
+Request:
+
+```json
+{
+  "city": "Mumbai",
+  "grade": "8"
+}
+```
+
+Response:
+
+```json
+{
+  "user": {
+    "id": "b60f7acf-fb86-4855-a47b-c738f658c406",
+    "role": "student",
+    "name": "Ravi Sharma",
+    "email": null,
+    "phone": "+91 9123456780",
+    "dob": "2012-08-15",
+    "gender": null,
+    "school": "Kendriya Vidyalaya",
+    "grade": "8",
+    "city": "Mumbai",
+    "state": null,
+    "guardianName": null,
+    "guardianPhone": null,
+    "createdAt": "2026-09-29T11:22:12.695Z"
+  }
+}
+```
+
+#### Edit — email taken by another account (409)
+
+`PATCH /admin/students/b60f7acf-fb86-4855-a47b-c738f658c406` · auth: admin token · **409**
+
+Request:
+
+```json
+{
+  "email": "asha@example.com"
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "This email is already used by another account",
+    "code": "CONFLICT",
+    "details": {
+      "email": ["This email is already used by another account"]
+    }
+  }
+}
+```
+
+#### List students
+
+`GET /admin/students?search=asha&page=1&pageSize=20` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "items": [
+    {
+      "id": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+      "role": "student",
+      "name": "Asha Kumar",
+      "email": "asha@example.com",
+      "phone": "+91 9876543210",
+      "dob": "2013-05-10",
+      "gender": "female",
+      "school": "DPS",
+      "grade": "7",
+      "city": "Pune",
+      "state": "Maharashtra",
+      "guardianName": "R. Kumar",
+      "guardianPhone": "+91 9876500000",
+      "createdAt": "2026-09-29T11:22:11.814Z",
+      "registrationsCount": 1,
+      "papersSubmitted": 1,
+      "totalPaid": 471.06
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "pageSize": 20
+}
+```
+
+#### Student detail
+
+`GET /admin/students/c9fcdee5-9364-44c8-9c45-e0041f2d9e80` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "user": {
+    "id": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+    "role": "student",
+    "name": "Asha Kumar",
+    "email": "asha@example.com",
+    "phone": "+91 9876543210",
+    "dob": "2013-05-10",
+    "gender": "female",
+    "school": "DPS",
+    "grade": "7",
+    "city": "Pune",
+    "state": "Maharashtra",
+    "guardianName": "R. Kumar",
+    "guardianPhone": "+91 9876500000",
+    "createdAt": "2026-09-29T11:22:11.814Z"
+  },
+  "registrations": [
+    {
+      "id": "7552c10d-9cf1-4b6f-95b9-734107f4b42d",
+      "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+      "studentId": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+      "status": "active",
+      "registeredAt": "2026-09-29T11:22:12.440Z",
+      "slotByLevel": {
+        "e74dcc72-d766-416b-838b-32c191d38dcc": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4"
+      },
+      "payment": {
+        "id": "7e396aef-9acf-48b5-af62-9c9309086611",
+        "gross": 499,
+        "discount": 99.8,
+        "tax": 71.86,
+        "amount": 471.06,
+        "discountCode": "EARLY20",
+        "status": "paid",
+        "method": "Mock",
+        "razorpayOrderId": null,
+        "razorpayPaymentId": null,
+        "provider": "mock",
+        "createdAt": "2026-09-29T11:22:12.443Z"
+      },
+      "exam": {
+        "id": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+        "title": "Interglade Maths Olympiad 2026",
+        "description": "A three-level maths challenge for school students. Clear each level to unlock the next.",
+        "award": "Gold medal + ₹10,000 scholarship for the top scorer",
+        "ageGroupMin": 8,
+        "ageGroupMax": 16,
+        "registrationStart": "2026-09-19T11:22:10.679Z",
+        "registrationEnd": "2026-10-19T11:22:10.679Z",
+        "examStart": "2026-09-28T11:22:10.679Z",
+        "examEnd": "2026-10-29T11:22:10.679Z",
+        "durationMinutes": 30,
+        "registrationFee": 499,
+        "currency": "INR",
+        "practiceAttempts": 3,
+        "practiceQuestionCount": 10,
+        "published": true,
+        "phase": "In Progress",
+        "registrationOpen": true,
+        "registeredCount": 1,
+        "levels": [
+          {
+            "id": "e74dcc72-d766-416b-838b-32c191d38dcc",
+            "order": 1,
+            "name": "Level 1 — Foundation",
+            "attempts": 5,
+            "durationMinutes": 30,
+            "passPercent": 40,
+            "sections": [
+              {
+                "id": "f9f45ea3-a10b-4dcd-bb09-b0b282dffbdc",
+                "category": "Mathematics",
+                "categoryId": "3f0dc79e-8432-46a0-b3e4-0fe4929d10b8",
+                "complexity": "Low",
+                "questionCount": 10,
+                "marksPerQuestion": 1
+              }
+            ],
+            "maxScore": 15
+          }
+        ],
+        "slots": [
+          {
+            "id": "a9e9dcc9-54f2-4b2b-8b5a-a5f4ccd825c4",
+            "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+            "startsAt": "2026-09-29T10:22:10.679Z",
+            "endsAt": "2026-10-14T11:22:10.679Z",
+            "capacity": 500,
+            "bookedCount": 1
+          }
+        ],
+        "createdAt": "2026-09-29T11:22:10.680Z"
+      }
+    }
+  ],
+  "papers": [
+    {
+      "id": "eb2d952d-de52-432c-b52c-23b93b7ddf42",
+      "mode": "real",
+      "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+      "examTitle": "Interglade Maths Olympiad 2026",
+      "levelId": "e74dcc72-d766-416b-838b-32c191d38dcc",
+      "levelName": "Level 1 — Foundation",
+      "attemptNumber": 1,
+      "score": 12,
+      "maxScore": 15,
+      "startedAt": "2026-09-29T11:22:12.491Z",
+      "submittedAt": "2026-09-29T11:22:12.528Z",
+      "timeTakenSeconds": 0
+    }
+  ]
+}
+```
+
+#### Create an admin
+
+`POST /admin/admins` · auth: admin token · **201**
+
+Request:
+
+```json
+{
+  "name": "Priya Admin",
+  "email": "priya@interglade.com",
+  "password": "Secret123"
+}
+```
+
+Response:
+
+```json
+{
+  "user": {
+    "id": "c6d06fa0-87d5-4a99-8405-8f9affb664aa",
+    "role": "admin",
+    "name": "Priya Admin",
+    "email": "priya@interglade.com",
+    "phone": null,
+    "dob": null,
+    "gender": null,
+    "school": null,
+    "grade": null,
+    "city": null,
+    "state": null,
+    "guardianName": null,
+    "guardianPhone": null,
+    "createdAt": "2026-09-29T11:22:12.781Z"
+  }
+}
+```
+
+#### List admins
+
+`GET /admin/admins` · auth: admin token · **200**
+
+Response:
+
+```json
+[
+  {
+    "id": "ab87783e-53cb-43c0-9881-4a955a8e1b8a",
+    "role": "admin",
+    "name": "Interglade Admin",
+    "email": "admin@interglade.com",
+    "phone": null,
+    "dob": null,
+    "gender": null,
+    "school": null,
+    "grade": null,
+    "city": null,
+    "state": null,
+    "guardianName": null,
+    "guardianPhone": null,
+    "createdAt": "2026-09-29T11:22:10.642Z"
+  },
+  {
+    "id": "c6d06fa0-87d5-4a99-8405-8f9affb664aa",
+    "role": "admin",
+    "name": "Priya Admin",
+    "email": "priya@interglade.com",
+    "phone": null,
+    "dob": null,
+    "gender": null,
+    "school": null,
+    "grade": null,
+    "city": null,
+    "state": null,
+    "guardianName": null,
+    "guardianPhone": null,
+    "createdAt": "2026-09-29T11:22:12.781Z"
+  }
+]
+```
+
+### 18.10 Admin — payments ledger
+
+#### Ledger
+
+`GET /admin/payments?examId=276db0fb-c136-42f7-8abc-1469431b0e6e&search=asha&page=1&pageSize=20` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "items": [
+    {
+      "id": "7e396aef-9acf-48b5-af62-9c9309086611",
+      "gross": 499,
+      "discount": 99.8,
+      "tax": 71.86,
+      "amount": 471.06,
+      "discountCode": "EARLY20",
+      "status": "paid",
+      "method": "Mock",
+      "razorpayOrderId": null,
+      "razorpayPaymentId": null,
+      "provider": "mock",
+      "createdAt": "2026-09-29T11:22:12.443Z",
+      "examId": "276db0fb-c136-42f7-8abc-1469431b0e6e",
+      "examTitle": "Interglade Maths Olympiad 2026",
+      "student": {
+        "id": "c9fcdee5-9364-44c8-9c45-e0041f2d9e80",
+        "name": "Asha Kumar",
+        "email": "asha@example.com"
+      }
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "pageSize": 20,
+  "totals": {
+    "net": 471.06,
+    "discount": 99.8,
+    "tax": 71.86
+  }
+}
+```
+
+### 18.11 Admin — discounts
+
+#### Create a discount
+
+`POST /admin/discounts` · auth: admin token · **201**
+
+Request:
+
+```json
+{
+  "code": "SCIENCE10",
+  "label": "Science week — ₹100 off",
+  "type": "flat",
+  "value": 100,
+  "validFrom": "2026-09-29T11:22:12.000Z",
+  "validTo": "2026-10-29T11:22:12.000Z",
+  "maxUses": 200,
+  "examIds": ["276db0fb-c136-42f7-8abc-1469431b0e6e"],
+  "active": true
+}
+```
+
+Response:
+
+```json
+{
+  "id": "7b6f2ef0-d9ed-4894-8957-c9206fda8048",
+  "code": "SCIENCE10",
+  "label": "Science week — ₹100 off",
+  "type": "flat",
+  "value": 100,
+  "validFrom": "2026-09-29T11:22:12.000Z",
+  "validTo": "2026-10-29T11:22:12.000Z",
+  "maxUses": 200,
+  "examIds": ["276db0fb-c136-42f7-8abc-1469431b0e6e"],
+  "active": true,
+  "used": 0,
+  "createdAt": "2026-09-29T11:22:12.797Z"
+}
+```
+
+#### Duplicate code (409)
+
+`POST /admin/discounts` · auth: admin token · **409**
+
+Request:
+
+```json
+{
+  "code": "EARLY20",
+  "type": "percent",
+  "value": 10,
+  "validFrom": "2026-09-29T11:22:12.000Z",
+  "validTo": "2026-10-29T11:22:12.000Z"
+}
+```
+
+Response:
+
+```json
+{
+  "error": {
+    "message": "A discount with this code already exists",
+    "code": "CONFLICT",
+    "details": {
+      "code": ["This code is already in use"]
+    }
+  }
+}
+```
+
+#### Update a discount
+
+`PUT /admin/discounts/7b6f2ef0-d9ed-4894-8957-c9206fda8048` · auth: admin token · **200**
+
+Request:
+
+```json
+{
+  "code": "SCIENCE10",
+  "label": "Science week — 10% off",
+  "type": "percent",
+  "value": 10,
+  "validFrom": "2026-09-29T11:22:12.000Z",
+  "validTo": "2026-10-29T11:22:12.000Z",
+  "maxUses": null,
+  "examIds": [],
+  "active": true
+}
+```
+
+Response:
+
+```json
+{
+  "id": "7b6f2ef0-d9ed-4894-8957-c9206fda8048",
+  "code": "SCIENCE10",
+  "label": "Science week — 10% off",
+  "type": "percent",
+  "value": 10,
+  "validFrom": "2026-09-29T11:22:12.000Z",
+  "validTo": "2026-10-29T11:22:12.000Z",
+  "maxUses": null,
+  "examIds": [],
+  "active": true,
+  "used": 0,
+  "createdAt": "2026-09-29T11:22:12.797Z"
+}
+```
+
+#### List discounts
+
+`GET /admin/discounts` · auth: admin token · **200**
+
+Response:
+
+```json
+[
+  {
+    "id": "7b6f2ef0-d9ed-4894-8957-c9206fda8048",
+    "code": "SCIENCE10",
+    "label": "Science week — 10% off",
+    "type": "percent",
+    "value": 10,
+    "validFrom": "2026-09-29T11:22:12.000Z",
+    "validTo": "2026-10-29T11:22:12.000Z",
+    "maxUses": null,
+    "examIds": [],
+    "active": true,
+    "used": 0,
+    "createdAt": "2026-09-29T11:22:12.797Z"
+  },
+  {
+    "id": "d19259cb-e0f2-4fd0-9171-436ac49d0e1d",
+    "code": "EARLY20",
+    "label": "Early bird 20% off",
+    "type": "percent",
+    "value": 20,
+    "validFrom": "2026-09-29T11:22:10.699Z",
+    "validTo": "2026-11-28T11:22:10.699Z",
+    "maxUses": 500,
+    "examIds": [],
+    "active": true,
+    "used": 1,
+    "createdAt": "2026-09-29T11:22:10.699Z"
+  }
+]
+```
+
+#### Delete a discount
+
+`DELETE /admin/discounts/7b6f2ef0-d9ed-4894-8957-c9206fda8048` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "ok": true
+}
+```
+
+### 18.12 Categories & question bank
+
+#### Admin categories
+
+`GET /admin/categories` · auth: admin token · **200**
+
+Response:
+
+```json
+[
+  {
+    "id": "409e7081-a3da-4f62-8639-6d929c1cafd5",
+    "name": "Computers",
+    "slug": "computers",
+    "description": "Admin-managed question bank",
+    "generator": "bank",
+    "questionCount": 15
+  },
+  {
+    "id": "50fbd357-9c92-4001-9cd4-97f662569e61",
+    "name": "English",
+    "slug": "english",
+    "description": "Admin-managed question bank",
+    "generator": "bank",
+    "questionCount": 15
+  }
+]
+```
+
+#### Create a category
+
+`POST /admin/categories` · auth: admin token · **201**
+
+Request:
+
+```json
+{
+  "name": "History",
+  "description": "World and Indian history",
+  "generator": "bank"
+}
+```
+
+Response:
+
+```json
+{
+  "id": "57972b80-fa76-4a63-a453-a1adf3e231f1",
+  "name": "History",
+  "slug": "history",
+  "description": "World and Indian history",
+  "generator": "bank",
+  "questionCount": 0
+}
+```
+
+#### Update a category
+
+`PUT /admin/categories/57972b80-fa76-4a63-a453-a1adf3e231f1` · auth: admin token · **200**
+
+Request:
+
+```json
+{
+  "name": "History",
+  "description": "Indian history",
+  "generator": "bank"
+}
+```
+
+Response:
+
+```json
+{
+  "id": "57972b80-fa76-4a63-a453-a1adf3e231f1",
+  "name": "History",
+  "slug": "history",
+  "description": "Indian history",
+  "generator": "bank",
+  "questionCount": 0
+}
+```
+
+#### Create a question
+
+`POST /admin/questions` · auth: admin token · **201**
+
+Request:
+
+```json
+{
+  "categoryId": "57972b80-fa76-4a63-a453-a1adf3e231f1",
+  "complexity": "Low",
+  "text": "Who was the first Prime Minister of India?",
+  "options": ["Jawaharlal Nehru", "Sardar Patel", "Rajendra Prasad", "Indira Gandhi"],
+  "correctIndex": 0,
+  "explanation": "Nehru served from 1947 to 1964."
+}
+```
+
+Response:
+
+```json
+{
+  "id": "71e4ccae-eb6c-445c-b388-1c19559c17e4",
+  "categoryId": "57972b80-fa76-4a63-a453-a1adf3e231f1",
+  "category": "History",
+  "complexity": "Low",
+  "text": "Who was the first Prime Minister of India?",
+  "options": ["Jawaharlal Nehru", "Sardar Patel", "Rajendra Prasad", "Indira Gandhi"],
+  "correctIndex": 0,
+  "explanation": "Nehru served from 1947 to 1964.",
+  "createdAt": "2026-09-29T11:22:12.812Z"
+}
+```
+
+#### Update a question
+
+`PUT /admin/questions/71e4ccae-eb6c-445c-b388-1c19559c17e4` · auth: admin token · **200**
+
+Request:
+
+```json
+{
+  "categoryId": "57972b80-fa76-4a63-a453-a1adf3e231f1",
+  "complexity": "Medium",
+  "text": "Who was the first Prime Minister of India?",
+  "options": ["Jawaharlal Nehru", "Sardar Patel", "Rajendra Prasad", "Indira Gandhi"],
+  "correctIndex": 0,
+  "explanation": "Nehru served from 1947 to 1964."
+}
+```
+
+Response:
+
+```json
+{
+  "id": "71e4ccae-eb6c-445c-b388-1c19559c17e4",
+  "categoryId": "57972b80-fa76-4a63-a453-a1adf3e231f1",
+  "category": "History",
+  "complexity": "Medium",
+  "text": "Who was the first Prime Minister of India?",
+  "options": ["Jawaharlal Nehru", "Sardar Patel", "Rajendra Prasad", "Indira Gandhi"],
+  "correctIndex": 0,
+  "explanation": "Nehru served from 1947 to 1964.",
+  "createdAt": "2026-09-29T11:22:12.812Z"
+}
+```
+
+#### List questions
+
+`GET /admin/questions?categoryId=57972b80-fa76-4a63-a453-a1adf3e231f1&complexity=Medium&page=1&pageSize=20` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "items": [
+    {
+      "id": "71e4ccae-eb6c-445c-b388-1c19559c17e4",
+      "categoryId": "57972b80-fa76-4a63-a453-a1adf3e231f1",
+      "category": "History",
+      "complexity": "Medium",
+      "text": "Who was the first Prime Minister of India?",
+      "options": ["Jawaharlal Nehru", "Sardar Patel", "Rajendra Prasad", "Indira Gandhi"],
+      "correctIndex": 0,
+      "explanation": "Nehru served from 1947 to 1964.",
+      "createdAt": "2026-09-29T11:22:12.812Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "pageSize": 20
+}
+```
+
+#### Preview what a student would get
+
+`POST /admin/questions/preview` · auth: admin token · **200**
+
+Request:
+
+```json
+{
+  "categoryId": "e510b71c-1b10-4763-af8e-a41e7a93ad7d",
+  "complexity": "Medium",
+  "count": 2
+}
+```
+
+Response:
+
+```json
+[
+  {
+    "text": "What is the unit of force?",
+    "options": ["Joule", "Watt", "Pascal", "Newton"],
+    "correctIndex": 3,
+    "explanation": "Force is measured in newtons.",
+    "category": "Science",
+    "complexity": "Medium"
+  },
+  {
+    "text": "Which blood cells help fight infection?",
+    "options": ["White blood cells", "Platelets", "Plasma", "Red blood cells"],
+    "correctIndex": 0,
+    "explanation": "White blood cells defend the body.",
+    "category": "Science",
+    "complexity": "Medium"
+  }
+]
+```
+
+#### Delete a question
+
+`DELETE /admin/questions/71e4ccae-eb6c-445c-b388-1c19559c17e4` · auth: admin token · **200**
+
+Response:
+
+```json
+{
+  "ok": true
+}
+```
